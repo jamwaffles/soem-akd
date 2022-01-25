@@ -9,4 +9,4 @@ edition = "2021"
 anyhow = "1.0.53"
 env_logger = "0.9.0"
 log = "0.4.14"
-soem = { version = "0.3.0", path = "../SOEM-rs" }
+soem = { version = "0.3.0", path = "../soem-rs" }
