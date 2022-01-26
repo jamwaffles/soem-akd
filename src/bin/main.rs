@@ -1,9 +1,19 @@
-use std::os::raw::c_int;
+use std::{
+    mem::size_of,
+    os::raw::c_int,
+    ptr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use soem::*;
 
 const EC_TIMEOUTRXM: i32 = 70_000;
 const EC_TIMEOUTRET: i32 = 2000;
+const EC_TIMEOUTSTATE: i32 = 2000000;
 
 trait NilError<C> {
     fn nil_err(self, context: C) -> Result<(), ()>;
@@ -79,17 +89,26 @@ fn akd_setup(ctx: &mut soem::Context, slave: u16) -> Result<(), ()> {
 }
 
 // Mapped by 0x1720 - CSV mode
-#[repr(packed)]
+#[derive(Debug, Copy, Clone)]
+// C packing retains ordering and does not add padding
+#[repr(C, packed)]
 struct AkdOutputs {
     target_velocity: i32,
     control_word: u16,
 }
 
 // Mapped by 0x1b01 - ethercat manual p. 44
-#[repr(packed)]
+#[derive(Debug, Copy, Clone)]
+// C packing retains ordering and does not add padding
+#[repr(C, packed)]
 struct AkdInputs {
     position_actual_value: i32,
     status_word: u16,
+}
+
+// TODO: Realtime thread sleep?
+fn sleep_5000() {
+    std::thread::sleep(Duration::from_micros(5000));
 }
 
 fn main() -> anyhow::Result<()> {
@@ -142,22 +161,24 @@ fn main() -> anyhow::Result<()> {
 
     log::debug!("Found {} slaves", c.slaves().len());
 
-    let slave = c
-        .slaves()
-        .get_mut(0)
-        .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+    {
+        let slave = c
+            .slaves()
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
-    log::debug!(
-        "Got slave 0: {:#0x} {:#0x}",
-        slave.eep_manufacturer(),
-        slave.eep_id()
-    );
+        log::debug!(
+            "Got slave 0: {:#0x} {:#0x}",
+            slave.eep_manufacturer(),
+            slave.eep_id()
+        );
 
-    // Kollmorgen AKD
-    assert_eq!(slave.eep_manufacturer(), 0x6a);
-    assert_eq!(slave.eep_id(), 0x414b44);
+        // Kollmorgen AKD
+        assert_eq!(slave.eep_manufacturer(), 0x6a);
+        assert_eq!(slave.eep_id(), 0x414b44);
 
-    slave.register_po2so(akd_setup);
+        slave.register_po2so(akd_setup);
+    }
 
     log::debug!("Registered PO2SO hook");
 
@@ -176,7 +197,238 @@ fn main() -> anyhow::Result<()> {
         c.receive_processdata(EC_TIMEOUTRET);
     }
 
-    log::info!("{} slaves found and configured.", c.slaves().len());
+    log::info!("{} slaves mapped, state to SAFE_OP.", c.slaves().len());
+
+    c.check_state(0, EtherCatState::SafeOp, EC_TIMEOUTSTATE * 4);
+
+    // Cast inputs/outputs to a nice struct
+    // TODO
+
+    c.set_state(EtherCatState::Op, 0);
+
+    // Send process data once to make outputs happy
+    c.send_processdata();
+    c.receive_processdata(EC_TIMEOUTRET);
+
+    // let expected_wkc = c.groups()[0].expected_wkc();
+
+    c.write_state(0)?;
+
+    // Wait for slave to enter op state
+    for _ in 0..200 {
+        match c.check_state(0, EtherCatState::Op, 50000) {
+            EtherCatState::Op => break,
+            _ => {
+                c.send_processdata();
+                c.receive_processdata(EC_TIMEOUTRET);
+            }
+        }
+    }
+
+    log::trace!("Wait loop done");
+
+    // Exit if slave didn't reach operational state
+    if c.read_state() != EtherCatState::Op {
+        let e = anyhow::anyhow!("Cannot reach {} state for the slaves", EtherCatState::Op);
+
+        log::error!("{}", e);
+
+        let slave = c
+            .slaves()
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+
+        match slave.state() {
+            EtherCatState::Op => (),
+            state => {
+                log::error!("Slave 0 ({}) in state {}", slave.name(), state);
+            }
+        }
+
+        return Err(e);
+    }
+
+    log::info!("Slaves reached OP state");
+
+    // Slaves reached op state. Need to spawn a thread here to check/update state
+    // TODO: Spawn thread
+
+    {
+        let slave = c
+            .slaves()
+            .get_mut(0)
+            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+
+        // TODO: Move to an `{inputs|outputs}_cast` method on `Slave`. Maybe I can use Box here?
+        let in_ptr = {
+            let buf = slave.inputs();
+
+            assert_eq!(buf.len(), size_of::<AkdInputs>(), "inputs not castable");
+
+            let in_ptr: &AkdInputs = unsafe { std::mem::transmute(buf.as_ptr()) };
+
+            in_ptr
+        };
+
+        let out_ptr = {
+            let buf = slave.outputs();
+
+            assert_eq!(buf.len(), size_of::<AkdOutputs>(), "outputs not castable");
+
+            let out_ptr: &mut AkdOutputs = unsafe { std::mem::transmute(buf.as_mut_ptr()) };
+
+            out_ptr
+        };
+
+        log::debug!("Inputs {:?}", in_ptr);
+        log::debug!("Outputs {:?}", out_ptr);
+
+        // If we've faulted, clear faults by setting clear fault flag high
+        if (in_ptr.status_word & 0b1000) > 0x0 {
+            out_ptr.control_word = 0x80; //clear errors, rising edge
+
+            // Fault flag is bit 4, wait for clear
+            loop {
+                log::debug!("Wait for 6040 fault cleared, got {:#04x}", {
+                    (*in_ptr).status_word
+                });
+
+                c.send_processdata();
+                c.receive_processdata(EC_TIMEOUTRET);
+
+                sleep_5000();
+
+                if (in_ptr.status_word & 0b1000) > 0 {
+                    break;
+                }
+            }
+        }
+
+        // Shutdown
+        out_ptr.control_word = 0x6;
+
+        // ready to switch on, wait for it to be set
+        loop {
+            log::debug!("Wait for 6040 fault cleared again, got {:#04x}", {
+                (*in_ptr).status_word
+            });
+
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
+
+            sleep_5000();
+
+            if (in_ptr.status_word & 0b1) == 0 {
+                break;
+            }
+        }
+
+        // Switch on - this disengages the brake and "primes" the servo, but won't accept motion
+        // commands yet.
+        out_ptr.control_word = 0x7;
+
+        // switched on, wait for bit to be set
+        loop {
+            log::debug!("Wait for 6040 switch on, got {:#04x}", {
+                (*in_ptr).status_word
+            });
+
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
+
+            sleep_5000();
+
+            if (in_ptr.status_word & 0b10) == 0 {
+                break;
+            }
+        }
+
+        // Prevent motor from jumping on startup
+        out_ptr.target_velocity = 0;
+
+        // Enable operation - starts accepting motion comments
+        out_ptr.control_word = 0xf;
+
+        // operation enable, wait for bit to be set
+        loop {
+            log::debug!("Wait for 6040 switch on, got {:#04x}", {
+                (*in_ptr).status_word
+            });
+
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
+
+            sleep_5000();
+
+            if (in_ptr.status_word & 0b100) == 0 {
+                break;
+            }
+        }
+
+        log::info!("AKD state transitioned to Enable Operation\n");
+    }
+
+    let slave = c
+        .slaves()
+        .get_mut(0)
+        .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+
+    // TODO: Move to an `{inputs|outputs}_cast` method on `Slave`. Maybe I can use Box here?
+    let in_ptr = {
+        let buf = slave.inputs();
+
+        assert_eq!(buf.len(), size_of::<AkdInputs>(), "inputs not castable");
+
+        let in_ptr: &AkdInputs = unsafe { std::mem::transmute(buf.as_ptr()) };
+
+        in_ptr
+    };
+
+    let out_ptr = {
+        let buf = slave.outputs();
+
+        assert_eq!(buf.len(), size_of::<AkdOutputs>(), "outputs not castable");
+
+        let out_ptr: &mut AkdOutputs = unsafe { std::mem::transmute(buf.as_mut_ptr()) };
+
+        out_ptr
+    };
+
+    let mut pos = 0;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    while running.load(Ordering::SeqCst) {
+        c.send_processdata();
+        let wkc = c.receive_processdata(EC_TIMEOUTRET);
+
+        // TODO: Handle working counter
+
+        if pos < 1_000_000 {
+            pos += 1000;
+        }
+
+        out_ptr.target_velocity = pos;
+
+        log::info!(
+            "WKC {} T: {}, pos {}, status {:#04x}",
+            wkc,
+            c.dc_time(),
+            { (*in_ptr).position_actual_value },
+            { (*in_ptr).status_word },
+        );
+
+        sleep_5000()
+    }
+
+    c.set_state(EtherCatState::Init, 0);
+    c.write_state(0);
 
     Ok(())
 }
