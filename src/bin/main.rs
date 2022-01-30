@@ -1,7 +1,6 @@
 use std::{
     mem::size_of,
     os::raw::c_int,
-    ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -192,6 +191,7 @@ fn main() -> anyhow::Result<()> {
 
     log::debug!("DC done");
 
+    // "Static drift compensation" from poster
     for _ in 0..15000 {
         c.send_processdata();
         c.receive_processdata(EC_TIMEOUTRET);
@@ -200,9 +200,6 @@ fn main() -> anyhow::Result<()> {
     log::info!("{} slaves mapped, state to SAFE_OP.", c.slaves().len());
 
     c.check_state(0, EtherCatState::SafeOp, EC_TIMEOUTSTATE * 4);
-
-    // Cast inputs/outputs to a nice struct
-    // TODO
 
     c.set_state(EtherCatState::Op, 0);
 
@@ -259,26 +256,8 @@ fn main() -> anyhow::Result<()> {
             .get_mut(0)
             .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
-        // TODO: Move to an `{inputs|outputs}_cast` method on `Slave`. Maybe I can use Box here?
-        let in_ptr = {
-            let buf = slave.inputs();
-
-            assert_eq!(buf.len(), size_of::<AkdInputs>(), "inputs not castable");
-
-            let in_ptr: &AkdInputs = unsafe { std::mem::transmute(buf.as_ptr()) };
-
-            in_ptr
-        };
-
-        let out_ptr = {
-            let buf = slave.outputs();
-
-            assert_eq!(buf.len(), size_of::<AkdOutputs>(), "outputs not castable");
-
-            let out_ptr: &mut AkdOutputs = unsafe { std::mem::transmute(buf.as_mut_ptr()) };
-
-            out_ptr
-        };
+        let in_ptr = slave.inputs::<AkdInputs>();
+        let out_ptr = slave.outputs::<AkdOutputs>();
 
         log::debug!("Inputs {:?}", in_ptr);
         log::debug!("Outputs {:?}", out_ptr);
@@ -373,26 +352,8 @@ fn main() -> anyhow::Result<()> {
         .get_mut(0)
         .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
-    // TODO: Move to an `{inputs|outputs}_cast` method on `Slave`. Maybe I can use Box here?
-    let in_ptr = {
-        let buf = slave.inputs();
-
-        assert_eq!(buf.len(), size_of::<AkdInputs>(), "inputs not castable");
-
-        let in_ptr: &AkdInputs = unsafe { std::mem::transmute(buf.as_ptr()) };
-
-        in_ptr
-    };
-
-    let out_ptr = {
-        let buf = slave.outputs();
-
-        assert_eq!(buf.len(), size_of::<AkdOutputs>(), "outputs not castable");
-
-        let out_ptr: &mut AkdOutputs = unsafe { std::mem::transmute(buf.as_mut_ptr()) };
-
-        out_ptr
-    };
+    let in_ptr = slave.inputs::<AkdInputs>();
+    let out_ptr = slave.outputs::<AkdOutputs>();
 
     let mut pos = 0;
 
@@ -428,7 +389,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     c.set_state(EtherCatState::Init, 0);
-    c.write_state(0);
+    c.write_state(0).ok();
 
     Ok(())
 }
