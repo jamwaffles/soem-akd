@@ -162,10 +162,7 @@ fn main() -> anyhow::Result<()> {
     log::debug!("Found {} slaves", c.slaves().len());
 
     {
-        let slave = c
-            .slaves_mut()
-            .get_mut(0)
-            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+        let slave = c.slave_at(0).ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
         log::debug!(
             "Got slave 0: {:#0x} {:#0x}",
@@ -248,22 +245,20 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("Slaves reached OP state");
 
-    let c = Arc::new(parking_lot::RwLock::new(c));
+    // let c_poll = c.clone();
 
-    let c_poll = c.clone();
+    // let poll_handle = thread::spawn(move || loop {
+    //     let wkc = {
+    //         // NOTE: Don't lock for the entire loop, only in this block or we starve the main thread.
+    //         let mut c = c_poll.write();
+    //         c.send_processdata();
+    //         c.receive_processdata(EC_TIMEOUTRET)
+    //     };
 
-    let poll_handle = thread::spawn(move || loop {
-        let wkc = {
-            // NOTE: Don't lock for the entire loop, only in this block or we starve the main thread.
-            let mut c = c_poll.write();
-            c.send_processdata();
-            c.receive_processdata(EC_TIMEOUTRET)
-        };
+    //     // TODO: Handle WKC
 
-        // TODO: Handle WKC
-
-        sleep_5000();
-    });
+    //     sleep_5000();
+    // });
 
     // Slaves reached op state. Need to spawn a thread here to check/update state
     // TODO: Spawn thread
@@ -271,14 +266,16 @@ fn main() -> anyhow::Result<()> {
     let mut outputs = AkdOutputs::default();
 
     {
-        let slave = {
-            let c_reader = c.read();
+        // let slave = {
+        //     let c_reader = c;
 
-            c_reader
-                .slaves()
-                .get(0)
-                .ok_or_else(|| anyhow::anyhow!("No slave!"))?
-        };
+        //     c_reader
+        //         .slaves()
+        //         .get(0)
+        //         .ok_or_else(|| anyhow::anyhow!("No slave!"))?
+        // };
+
+        let slave = { c.slave_at(0).ok_or_else(|| anyhow::anyhow!("No slave!"))? };
 
         let in_ptr = slave.inputs::<AkdInputs>();
         // let out_ptr = slave.outputs::<AkdOutputs>();
@@ -298,7 +295,7 @@ fn main() -> anyhow::Result<()> {
 
             outputs.control_word = 0x80; // Clear errors, rising edge
 
-            c.write().set_slave_outputs(0, outputs);
+            c.set_slave_outputs(0, outputs);
 
             // Fault flag is bit 4, wait for clear
             loop {
@@ -306,8 +303,8 @@ fn main() -> anyhow::Result<()> {
                     (*in_ptr).status_word
                 });
 
-                // c.send_processdata();
-                // c.receive_processdata(EC_TIMEOUTRET);
+                c.send_processdata();
+                c.receive_processdata(EC_TIMEOUTRET);
 
                 sleep_5000();
 
@@ -317,7 +314,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        c.write().set_slave_outputs(
+        c.set_slave_outputs(
             0,
             AkdOutputs {
                 control_word: 0x6, // Shutdown
@@ -331,8 +328,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            // c.send_processdata();
-            // c.receive_processdata(EC_TIMEOUTRET);
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -345,7 +342,7 @@ fn main() -> anyhow::Result<()> {
         // commands yet.
         outputs.control_word = 0x7;
 
-        c.write().set_slave_outputs(0, outputs);
+        c.set_slave_outputs(0, outputs);
 
         // switched on, wait for bit to be set
         loop {
@@ -353,8 +350,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            // c.send_processdata();
-            // c.receive_processdata(EC_TIMEOUTRET);
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -368,7 +365,7 @@ fn main() -> anyhow::Result<()> {
         // Enable operation - starts accepting motion comments
         outputs.control_word = 0xf;
 
-        c.write().set_slave_outputs(0, outputs);
+        c.set_slave_outputs(0, outputs);
 
         // operation enable, wait for bit to be set
         loop {
@@ -376,8 +373,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            // c.send_processdata();
-            // c.receive_processdata(EC_TIMEOUTRET);
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -389,14 +386,16 @@ fn main() -> anyhow::Result<()> {
         log::info!("AKD state transitioned to Enable Operation\n");
     }
 
-    let slave = {
-        let c_reader = c.read();
+    // let slave = {
+    //     let c_reader = c;
 
-        c_reader
-            .slaves()
-            .get(0)
-            .ok_or_else(|| anyhow::anyhow!("No slave!"))?
-    };
+    //     c_reader
+    //         .slaves()
+    //         .get(0)
+    //         .ok_or_else(|| anyhow::anyhow!("No slave!"))?
+    // };
+
+    let slave = { c.slave_at(0).ok_or_else(|| anyhow::anyhow!("No slave!"))? };
 
     let in_ptr = slave.inputs::<AkdInputs>();
 
@@ -411,8 +410,8 @@ fn main() -> anyhow::Result<()> {
     .expect("Error setting Ctrl-C handler");
 
     while running.load(Ordering::SeqCst) {
-        // c.send_processdata();
-        // let wkc = c.receive_processdata(EC_TIMEOUTRET);
+        c.send_processdata();
+        let wkc = c.receive_processdata(EC_TIMEOUTRET);
 
         // TODO: Handle working counter
 
@@ -421,13 +420,12 @@ fn main() -> anyhow::Result<()> {
         }
 
         outputs.target_velocity = pos;
-        c.write().set_slave_outputs(0, outputs);
+        c.set_slave_outputs(0, outputs);
 
         log::info!(
             "WKC {} T: {}, pos {}, status {:#04x}",
-            // wkc,
-            0,
-            c.read().dc_time(),
+            wkc,
+            c.dc_time(),
             { (*in_ptr).position_actual_value },
             { (*in_ptr).status_word },
         );
@@ -435,10 +433,8 @@ fn main() -> anyhow::Result<()> {
         sleep_5000()
     }
 
-    let mut writer = c.write();
-
-    writer.set_state(EtherCatState::Init, 0);
-    writer.write_state(0).ok();
+    c.set_state(EtherCatState::Init, 0);
+    c.write_state(0).ok();
 
     Ok(())
 }
