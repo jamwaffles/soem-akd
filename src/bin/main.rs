@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    thread,
     time::Duration,
 };
 
@@ -88,7 +89,7 @@ fn akd_setup(ctx: &mut soem::Context, slave: u16) -> Result<(), ()> {
 }
 
 // Mapped by 0x1720 - CSV mode
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 // C packing retains ordering and does not add padding
 #[repr(C, packed)]
 struct AkdOutputs {
@@ -162,7 +163,7 @@ fn main() -> anyhow::Result<()> {
 
     {
         let slave = c
-            .slaves()
+            .slaves_mut()
             .get_mut(0)
             .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
@@ -224,47 +225,80 @@ fn main() -> anyhow::Result<()> {
 
     log::trace!("Wait loop done");
 
-    // Exit if slave didn't reach operational state
+    // Exit if slaves didn't reach operational state
     if c.read_state() != EtherCatState::Op {
         let e = anyhow::anyhow!("Cannot reach {} state for the slaves", EtherCatState::Op);
 
         log::error!("{}", e);
 
-        let slave = c
-            .slaves()
-            .get_mut(0)
-            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+        // let slave = c
+        //     .slaves()
+        //     .get(0)
+        //     .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
 
-        match slave.state() {
-            EtherCatState::Op => (),
-            state => {
-                log::error!("Slave 0 ({}) in state {}", slave.name(), state);
-            }
-        }
+        // match slave.state() {
+        //     EtherCatState::Op => (),
+        //     state => {
+        //         log::error!("Slave 0 ({}) in state {}", slave.name(), state);
+        //     }
+        // }
 
         return Err(e);
     }
 
     log::info!("Slaves reached OP state");
 
+    let c = Arc::new(parking_lot::RwLock::new(c));
+
+    let c_poll = c.clone();
+
+    let poll_handle = thread::spawn(move || loop {
+        let wkc = {
+            // NOTE: Don't lock for the entire loop, only in this block or we starve the main thread.
+            let mut c = c_poll.write();
+            c.send_processdata();
+            c.receive_processdata(EC_TIMEOUTRET)
+        };
+
+        // TODO: Handle WKC
+
+        sleep_5000();
+    });
+
     // Slaves reached op state. Need to spawn a thread here to check/update state
     // TODO: Spawn thread
 
+    let mut outputs = AkdOutputs::default();
+
     {
-        let slave = c
-            .slaves()
-            .get_mut(0)
-            .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+        let slave = {
+            let c_reader = c.read();
+
+            c_reader
+                .slaves()
+                .get(0)
+                .ok_or_else(|| anyhow::anyhow!("No slave!"))?
+        };
 
         let in_ptr = slave.inputs::<AkdInputs>();
-        let out_ptr = slave.outputs::<AkdOutputs>();
+        // let out_ptr = slave.outputs::<AkdOutputs>();
+        // let out_ptr: AkdOutputs = todo!();
 
         log::debug!("Inputs {:?}", in_ptr);
-        log::debug!("Outputs {:?}", out_ptr);
+        // log::debug!("Outputs {:?}", out_ptr);
 
         // If we've faulted, clear faults by setting clear fault flag high
         if (in_ptr.status_word & 0b1000) > 0x0 {
-            out_ptr.control_word = 0x80; //clear errors, rising edge
+            // // out_ptr.control_word = 0x80; //clear errors, rising edge
+            // c.slaves_mut()
+            //     .get_mut(0)
+            //     .ok_or_else(|| anyhow::anyhow!("No slave!"))?
+            //     .outputs::<AkdOutputs>()
+            //     .control_word = 0x80;
+
+            outputs.control_word = 0x80; // Clear errors, rising edge
+
+            c.write().set_slave_outputs(0, outputs);
 
             // Fault flag is bit 4, wait for clear
             loop {
@@ -272,8 +306,8 @@ fn main() -> anyhow::Result<()> {
                     (*in_ptr).status_word
                 });
 
-                c.send_processdata();
-                c.receive_processdata(EC_TIMEOUTRET);
+                // c.send_processdata();
+                // c.receive_processdata(EC_TIMEOUTRET);
 
                 sleep_5000();
 
@@ -283,8 +317,13 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Shutdown
-        out_ptr.control_word = 0x6;
+        c.write().set_slave_outputs(
+            0,
+            AkdOutputs {
+                control_word: 0x6, // Shutdown
+                ..AkdOutputs::default()
+            },
+        );
 
         // ready to switch on, wait for it to be set
         loop {
@@ -292,8 +331,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            c.send_processdata();
-            c.receive_processdata(EC_TIMEOUTRET);
+            // c.send_processdata();
+            // c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -304,7 +343,9 @@ fn main() -> anyhow::Result<()> {
 
         // Switch on - this disengages the brake and "primes" the servo, but won't accept motion
         // commands yet.
-        out_ptr.control_word = 0x7;
+        outputs.control_word = 0x7;
+
+        c.write().set_slave_outputs(0, outputs);
 
         // switched on, wait for bit to be set
         loop {
@@ -312,8 +353,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            c.send_processdata();
-            c.receive_processdata(EC_TIMEOUTRET);
+            // c.send_processdata();
+            // c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -323,10 +364,11 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Prevent motor from jumping on startup
-        out_ptr.target_velocity = 0;
-
+        outputs.target_velocity = 0;
         // Enable operation - starts accepting motion comments
-        out_ptr.control_word = 0xf;
+        outputs.control_word = 0xf;
+
+        c.write().set_slave_outputs(0, outputs);
 
         // operation enable, wait for bit to be set
         loop {
@@ -334,8 +376,8 @@ fn main() -> anyhow::Result<()> {
                 (*in_ptr).status_word
             });
 
-            c.send_processdata();
-            c.receive_processdata(EC_TIMEOUTRET);
+            // c.send_processdata();
+            // c.receive_processdata(EC_TIMEOUTRET);
 
             sleep_5000();
 
@@ -347,13 +389,16 @@ fn main() -> anyhow::Result<()> {
         log::info!("AKD state transitioned to Enable Operation\n");
     }
 
-    let slave = c
-        .slaves()
-        .get_mut(0)
-        .ok_or_else(|| anyhow::anyhow!("No slave!"))?;
+    let slave = {
+        let c_reader = c.read();
+
+        c_reader
+            .slaves()
+            .get(0)
+            .ok_or_else(|| anyhow::anyhow!("No slave!"))?
+    };
 
     let in_ptr = slave.inputs::<AkdInputs>();
-    let out_ptr = slave.outputs::<AkdOutputs>();
 
     let mut pos = 0;
 
@@ -366,8 +411,8 @@ fn main() -> anyhow::Result<()> {
     .expect("Error setting Ctrl-C handler");
 
     while running.load(Ordering::SeqCst) {
-        c.send_processdata();
-        let wkc = c.receive_processdata(EC_TIMEOUTRET);
+        // c.send_processdata();
+        // let wkc = c.receive_processdata(EC_TIMEOUTRET);
 
         // TODO: Handle working counter
 
@@ -375,12 +420,14 @@ fn main() -> anyhow::Result<()> {
             pos += 1000;
         }
 
-        out_ptr.target_velocity = pos;
+        outputs.target_velocity = pos;
+        c.write().set_slave_outputs(0, outputs);
 
         log::info!(
             "WKC {} T: {}, pos {}, status {:#04x}",
-            wkc,
-            c.dc_time(),
+            // wkc,
+            0,
+            c.read().dc_time(),
             { (*in_ptr).position_actual_value },
             { (*in_ptr).status_word },
         );
@@ -388,8 +435,10 @@ fn main() -> anyhow::Result<()> {
         sleep_5000()
     }
 
-    c.set_state(EtherCatState::Init, 0);
-    c.write_state(0).ok();
+    let mut writer = c.write();
+
+    writer.set_state(EtherCatState::Init, 0);
+    writer.write_state(0).ok();
 
     Ok(())
 }
