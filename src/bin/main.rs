@@ -295,7 +295,8 @@ fn main() -> anyhow::Result<()> {
 
             outputs.control_word = 0x80; // Clear errors, rising edge
 
-            c.set_slave_outputs(0, outputs);
+            // *slave.outputs() = outputs;
+            *slave.outputs() = outputs;
 
             // Fault flag is bit 4, wait for clear
             loop {
@@ -314,13 +315,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        c.set_slave_outputs(
-            0,
-            AkdOutputs {
-                control_word: 0x6, // Shutdown
-                ..AkdOutputs::default()
-            },
-        );
+        outputs.control_word = 0x6;
+
+        *slave.outputs() = outputs;
 
         // ready to switch on, wait for it to be set
         loop {
@@ -342,7 +339,7 @@ fn main() -> anyhow::Result<()> {
         // commands yet.
         outputs.control_word = 0x7;
 
-        c.set_slave_outputs(0, outputs);
+        *slave.outputs() = outputs;
 
         // switched on, wait for bit to be set
         loop {
@@ -365,7 +362,7 @@ fn main() -> anyhow::Result<()> {
         // Enable operation - starts accepting motion comments
         outputs.control_word = 0xf;
 
-        c.set_slave_outputs(0, outputs);
+        *slave.outputs() = outputs;
 
         // operation enable, wait for bit to be set
         loop {
@@ -420,7 +417,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         outputs.target_velocity = pos;
-        c.set_slave_outputs(0, outputs);
+        *slave.outputs() = outputs;
 
         log::info!(
             "WKC {} T: {}, pos {}, status {:#04x}",
