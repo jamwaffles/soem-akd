@@ -1,5 +1,5 @@
 use std::{
-    mem::size_of,
+    mem::{self, size_of},
     os::raw::c_int,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
     let iface_name = "eth0";
 
     let mut port: Port = Default::default();
-    let mut slaves: [Slave; 8] = Default::default();
+    let mut slaves: [Slave; 200] = unsafe { mem::zeroed() };
     let mut slavecount: c_int = Default::default();
     let mut groups: [Group; 2] = Default::default();
     let mut esibuf: ESIBuf = Default::default();
@@ -138,21 +138,21 @@ fn main() -> anyhow::Result<()> {
 
     let mut c = Context::new(
         iface_name,
-        &mut port,
-        &mut slaves,
-        &mut slavecount,
-        &mut groups,
-        &mut esibuf,
-        &mut esimap,
-        &mut elist,
-        &mut idxstack,
-        &mut ecaterror,
-        &mut dc_time,
-        &mut sm_commtype,
-        &mut pdo_assign,
-        &mut pdo_desc,
-        &mut eep_sm,
-        &mut eep_fmmu,
+        port,
+        slaves,
+        slavecount,
+        groups,
+        esibuf,
+        esimap,
+        elist,
+        idxstack,
+        ecaterror,
+        dc_time,
+        sm_commtype,
+        pdo_assign,
+        pdo_desc,
+        eep_sm,
+        eep_fmmu,
     )
     .map_err(|err| anyhow::anyhow!("Cannot create context: {}", err))?;
 
