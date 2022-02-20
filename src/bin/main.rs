@@ -116,21 +116,21 @@ fn main() -> anyhow::Result<()> {
 
     let iface_name = "eth0";
 
-    let mut port: Port = Default::default();
-    let mut slaves: [Slave; 200] = unsafe { mem::zeroed() };
-    let mut slavecount: c_int = Default::default();
-    let mut groups: [Group; 2] = Default::default();
-    let mut esibuf: ESIBuf = Default::default();
-    let mut esimap: ESIMap = Default::default();
-    let mut elist: ERing = Default::default();
-    let mut idxstack: IdxStack = Default::default();
-    let mut ecaterror: Boolean = Default::default();
-    let mut dc_time: i64 = Default::default();
-    let mut sm_commtype: SMCommType = Default::default();
-    let mut pdo_assign: PDOAssign = Default::default();
-    let mut pdo_desc: PDODesc = Default::default();
-    let mut eep_sm: EEPROMSM = Default::default();
-    let mut eep_fmmu: EEPROMFMMU = Default::default();
+    let port: Port = Default::default();
+    let slaves: [Slave; 200] = unsafe { mem::zeroed() };
+    let slavecount: c_int = Default::default();
+    let groups: [Group; 2] = Default::default();
+    let esibuf: ESIBuf = Default::default();
+    let esimap: ESIMap = Default::default();
+    let elist: ERing = Default::default();
+    let idxstack: IdxStack = Default::default();
+    let ecaterror: Boolean = Default::default();
+    let dc_time: i64 = Default::default();
+    let sm_commtype: SMCommType = Default::default();
+    let pdo_assign: PDOAssign = Default::default();
+    let pdo_desc: PDODesc = Default::default();
+    let eep_sm: EEPROMSM = Default::default();
+    let eep_fmmu: EEPROMFMMU = Default::default();
 
     log::info!("EtherCAT starting on {}", iface_name);
 
@@ -245,20 +245,20 @@ fn main() -> anyhow::Result<()> {
 
     log::info!("Slaves reached OP state");
 
-    // let c_poll = c.clone();
+    let mut c = Arc::new(c);
 
-    // let poll_handle = thread::spawn(move || loop {
-    //     let wkc = {
-    //         // NOTE: Don't lock for the entire loop, only in this block or we starve the main thread.
-    //         let mut c = c_poll.write();
-    //         c.send_processdata();
-    //         c.receive_processdata(EC_TIMEOUTRET)
-    //     };
+    let c_poll = c.clone();
 
-    //     // TODO: Handle WKC
+    let poll_handle = thread::spawn(move || loop {
+        let wkc = {
+            c_poll.send_processdata();
+            c_poll.receive_processdata(EC_TIMEOUTRET)
+        };
 
-    //     sleep_5000();
-    // });
+        // TODO: Handle WKC
+
+        sleep_5000();
+    });
 
     // Slaves reached op state. Need to spawn a thread here to check/update state
     // TODO: Spawn thread
